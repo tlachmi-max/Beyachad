@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#1e3a5f" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>ביחד – ניהול תזרים משפחתי</title>
+
+  <!-- Fonts -->
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Assistant:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind CSS CDN -->
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Assistant', 'sans-serif'] },
+          colors: {
+            brand: {
+              50:  '#eef2ff',
+              100: '#e0e7ff',
+              200: '#c7d2fe',
+              500: '#3b5bdb',
+              600: '#2f4ac4',
+              700: '#1e3a8a',
+              800: '#1e3a5f',
+              900: '#0f2040'
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- React + Babel CDN -->
+
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    * { direction: rtl; -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+    html, body, #root { height: 100%; overflow: hidden; }
+    body { font-family: 'Assistant', sans-serif; background: #f8fafc; -webkit-font-smoothing: antialiased; }
+    ::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+    input[type="number"] { direction: ltr; text-align: right; }
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    .overflow-y-auto { -webkit-overflow-scrolling: touch; }
+    @keyframes slideUp {
+      from { transform: translateY(100%); opacity: 0; }
+      to   { transform: translateY(0);    opacity: 1; }
+    }
+    .slide-up { animation: slideUp 0.3s ease; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: inline-block;
+      width: 20px; height: 20px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    .spinner-dark {
+      border-color: rgba(30,58,95,0.2);
+      border-top-color: #1e3a5f;
+    }
+  </style>
+
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    // ══════════════════════════════════════════════
+    //  ⚙️  CONFIG — שנה כאן את ה-URL של Apps Script
+    // ══════════════════════════════════════════════
+    const API_URL = 'https://script.google.com/macros/s/YOUR_SCRIPT_ID/exec';
+
+    // ── Constants ─────────────────────────────────
+    const CATEGORIES = ['סופר','רכב','דיור','חינוך','פנאי','רפואה','אחזקת בית','מיסים','אחר'];
+    const CATEGORY_META = {
+      'סופר':       { icon: '🛒', color: '#10b981', bg: '#d1fae5' },
+      'רכב':        { icon: '🚗', color: '#3b82f6', bg: '#dbeafe' },
+      'דיור':       { icon: '🏠', color: '#8b5cf6', bg: '#ede9fe' },
+      'חינוך':      { icon: '📚', color: '#f59e0b', bg: '#fef3c7' },
+      'פנאי':       { icon: '🎭', color: '#ec4899', bg: '#fce7f3' },
+      'רפואה':      { icon: '💊', color: '#ef4444', bg: '#fee2e2' },
+      'אחזקת בית': { icon: '🔧', color: '#6b7280', bg: '#f3f4f6' },
+      'מיסים':      { icon: '📋', color: '#14b8a6', bg: '#ccfbf1' },
+      'אחר':        { icon: '📌', color: '#94a3b8', bg: '#f8fafc'  },
+    };
+    const FREQ_LABELS = { monthly:'חודשי', bimonthly:'דו-חודשי', quarterly:'רבעוני', yearly:'שנתי' };
+    const MONTH_NAMES = ['','ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
+
+    const fmt = (n) => new Intl.NumberFormat('he-IL',{style:'currency',currency:'ILS',maximumFractionDigits:0}).format(n||0);
+    const fmtDate = (iso) => { if(!iso) return ''; const d=new Date(iso); return d.toLocaleDateString('he-IL',{day:'2-digit',month:'2-digit',year:'numeric'}); };
+    const todayISO = () => new Date().toISOString().split('T')[0];
+    const daysLeft = () => { const n=new Date(); const l=new Date(n.getFullYear(),n.getMonth()+1,0); return l.getDate()-n.getDate(); };
+
+    // ── API Layer ─────────────────────────────────
+    async function apiGet(params) {
+      const url = new URL(API_URL);
+      Object.entries(params).forEach(([k,v]) => url.searchParams.set(k,v));
+      const res = await fetch(url.toString());
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      return data;
+    }
+    async function apiPost(action, payload) {
+      const res = await fetch(API_URL, {
+        method: 'POST',
+        body: JSON.stringify({ action, payload }),
+        headers: { 'Content-Type': 'text/plain' }
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      return data;
+    }
+
+    const sheetsApi = {
+      getExpenses:   (m,y)  => apiGet({ action:'getExpenses', month:m, year:y }),
+      addExpense:    (p)    => apiPost('addExpense', p),
+      deleteExpense: (id)   => apiPost('deleteExpense', { id }),
+      getFixed:      ()     => apiGet({ action:'getFixed' }),
+      addFixed:      (p)    => apiPost('addFixed', p),
+      updateFixed:   (p)    => apiPost('updateFixed', p),
+      deleteFixed:   (id)   => apiPost('deleteFixed', { id }),
+      getIncome:     ()     => apiGet({ action:'getIncome' }),
+      saveIncome:    (items)=> apiPost('saveIncome', items),
+      getBudget:     ()     => apiGet({ action:'getBudget' }),
+      saveBudget:    (b)    => apiPost('saveBudget', b),
+      getSummary:    (m,y)  => apiGet({ action:'getSummary', month:m, year:y }),
+      init:          ()     => apiGet({ action:'init' }),
+    };
+
+    // ── Icons (inline SVG) ────────────────────────
+    const Icon = {
+      Plus: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+      X: ({size=18}) => <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
+      Check: ({size=18}) => <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>,
+      Trash: ({size=14}) => <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>,
+      Edit: ({size=13}) => <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
+      Refresh: ({size=16,spin=false}) => <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={spin?{animation:'spin 0.7s linear infinite'}:{}}><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>,
+      Clock: ({size=20}) => <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
+      Alert: ({size=16}) => <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
+      Home: ({size=22,active=false}) => <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={active?2.2:1.8} strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
+      Repeat: ({size=22,active=false}) => <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={active?2.2:1.8} strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>,
+      TrendUp: ({size=22,active=false}) => <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={active?2.2:1.8} strokeLinecap="round" strokeLinejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>,
+      Settings: ({size=22,active=false}) => <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={active?2.2:1.8} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+    };
+
+    // ── Spinner ───────────────────────────────────
+    const Spin = ({dark=false}) => <span className={`spinner ${dark?'spinner-dark':''}`} />;
+
+    // ── Logo ──────────────────────────────────────
+    function Logo({size=38}) {
+      return (
+        <svg width={size} height={size} viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+          {/* House outline */}
+          <path d="M14 38 L40 14 L66 38 L66 68 Q66 70 64 70 L16 70 Q14 70 14 68 Z"
+                stroke="#1e5f5a" strokeWidth="4" fill="none" strokeLinejoin="round" strokeLinecap="round"/>
+          {/* Left wall cut (open bottom-left) */}
+          <path d="M14 38 L14 68" stroke="#1e5f5a" strokeWidth="4" strokeLinecap="round"/>
+          {/* Chart line inside */}
+          <polyline points="22,58 32,46 42,50 52,38 62,28"
+                    stroke="#1e5f5a" strokeWidth="3.5" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+          {/* Arrow head */}
+          <polyline points="54,26 62,28 60,36"
+                    stroke="#1e5f5a" strokeWidth="3.5" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+          {/* Dots on chart */}
+          <circle cx="32" cy="46" r="2.5" fill="#1e5f5a"/>
+          <circle cx="42" cy="50" r="2.5" fill="#1e5f5a"/>
+          <circle cx="52" cy="38" r="2.5" fill="#1e5f5a"/>
+        </svg>
+      );
+    }
+
+    // ── BudgetMeter ───────────────────────────────
+    function BudgetMeter({ spent, budget, label='תקציב חודשי' }) {
+      const pct    = budget > 0 ? Math.min((spent/budget)*100, 100) : 0;
+      const over   = budget > 0 && spent > budget;
+      const remain = budget - spent;
+      const barColor = over ? '#ef4444' : pct > 80 ? '#f59e0b' : '#10b981';
+      return (
+        <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+          <div className="flex justify-between items-start mb-3">
+            <div>
+              <p className="text-xs text-gray-500 font-medium">{label}</p>
+              <p className="text-2xl font-bold text-brand-800 mt-0.5">{fmt(spent)}</p>
+            </div>
+            <div className="text-left">
+              <p className="text-xs text-gray-500">מתוך {fmt(budget)}</p>
+              <p className={`text-sm font-bold mt-0.5 ${over?'text-red-500':'text-emerald-600'}`}>
+                {over ? `חרגתם ב-${fmt(Math.abs(remain))}` : `נשאר ${fmt(remain)}`}
+              </p>
+            </div>
+          </div>
+          <div className="h-3 bg-gray-100 rounded-full overflow-hidden">
+            <div className="h-full rounded-full transition-all duration-700"
+                 style={{ width:`${pct}%`, backgroundColor:barColor }} />
+          </div>
+          <div className="flex justify-between mt-1">
+            <span className="text-xs text-gray-400">0%</span>
+            <span className={`text-xs font-semibold ${over?'text-red-500':'text-gray-500'}`}>{pct.toFixed(0)}%</span>
+            <span className="text-xs text-gray-400">100%</span>
+          </div>
+        </div>
+      );
+    }
+
+    // ── AddExpenseModal ───────────────────────────
+    function AddExpenseModal({ onClose, onSave, saving }) {
+      const [form, setForm] = useState({ name:'', category:'סופר', amount:'', date:todayISO(), notes:'', addedBy:'' });
+      const [errors, setErrors] = useState({});
+      const set = (k,v) => setForm(f=>({...f,[k]:v}));
+
+      const validate = () => {
+        const e = {};
+        if (!form.name.trim())               e.name   = 'נדרש שם';
+        if (!form.amount || +form.amount<=0) e.amount = 'נדרש סכום';
+        setErrors(e);
+        return !Object.keys(e).length;
+      };
+      const submit = async () => {
+        if (!validate()) return;
+        await onSave({ ...form, amount:+form.amount });
+        onClose();
+      };
+      return (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40"
+             onClick={e => e.target===e.currentTarget && onClose()}>
+          <div className="w-full max-w-lg bg-white rounded-t-3xl shadow-2xl slide-up"
+               style={{ maxHeight:'90vh', overflowY:'auto' }}>
+            <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-gray-100">
+              <button onClick={onClose} className="w-9 h-9 flex items-center justify-center rounded-full bg-gray-100 text-gray-500">
+                <Icon.X />
+              </button>
+              <h2 className="text-lg font-bold text-brand-800">הוספת הוצאה</h2>
+              <div className="w-9"/>
+            </div>
+            <div className="px-5 py-4 space-y-4">
+              {/* Name */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1.5">שם ההוצאה *</label>
+                <input type="text" value={form.name} onChange={e=>set('name',e.target.value)}
+                       placeholder="למשל: קניות שוק" className={`w-full px-4 py-3 rounded-xl border text-base focus:outline-none focus:ring-2 focus:ring-brand-500 ${errors.name?'border-red-400 bg-red-50':'border-gray-200 bg-gray-50'}`} />
+                {errors.name && <p className="text-red-500 text-xs mt-1">{errors.name}</p>}
+              </div>
+              {/* Category */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">קטגוריה</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {CATEGORIES.map(cat => {
+                    const meta = CATEGORY_META[cat];
+                    return (
+                      <button key={cat} onClick={()=>set('category',cat)}
+                              className={`flex flex-col items-center gap-1 py-2.5 px-2 rounded-xl border-2 text-xs font-semibold transition-all ${form.category===cat?'border-brand-500 bg-brand-50 text-brand-800':'border-gray-100 bg-gray-50 text-gray-600'}`}>
+                        <span className="text-xl">{meta.icon}</span>
+                        <span>{cat}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              {/* Amount + Date */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1.5">סכום (₪) *</label>
+                  <input type="number" inputMode="numeric" value={form.amount} onChange={e=>set('amount',e.target.value)}
+                         placeholder="0" className={`w-full px-4 py-3 rounded-xl border text-base focus:outline-none focus:ring-2 focus:ring-brand-500 ${errors.amount?'border-red-400 bg-red-50':'border-gray-200 bg-gray-50'}`} />
+                  {errors.amount && <p className="text-red-500 text-xs mt-1">{errors.amount}</p>}
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1.5">תאריך</label>
+                  <input type="date" value={form.date} onChange={e=>set('date',e.target.value)}
+                         className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-base focus:outline-none focus:ring-2 focus:ring-brand-500" />
+                </div>
+              </div>
+              {/* Added by */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1.5">נוסף על ידי</label>
+                <input type="text" value={form.addedBy} onChange={e=>set('addedBy',e.target.value)}
+                       placeholder="שמך" className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-base focus:outline-none focus:ring-2 focus:ring-brand-500" />
+              </div>
+              {/* Notes */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1.5">הערות</label>
+                <textarea value={form.notes} onChange={e=>set('notes',e.target.value)} rows={2}
+                          placeholder="הערה אופציונלית..." className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-base focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none" />
+              </div>
+              <button onClick={submit} disabled={saving}
+                      className="w-full bg-brand-800 text-white py-4 rounded-2xl font-bold text-base flex items-center justify-center gap-2 hover:bg-brand-700 active:scale-95 transition-all disabled:opacity-50 mb-6">
+                {saving ? <Spin /> : <><Icon.Check size={18}/> שמור הוצאה</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Dashboard Tab ─────────────────────────────
+    function Dashboard() {
+      const now = new Date();
+      const [month] = useState(now.getMonth()+1);
+      const [year]  = useState(now.getFullYear());
+      const [expenses, setExpenses] = useState([]);
+      const [summary,  setSummary]  = useState(null);
+      const [loading,  setLoading]  = useState(true);
+      const [error,    setError]    = useState(null);
+      const [showModal, setShowModal] = useState(false);
+      const [saving,    setSaving]   = useState(false);
+      const [deleting,  setDeleting] = useState(null);
+
+      const load = useCallback(async () => {
+        setLoading(true); setError(null);
+        try {
+          const [eRes, sRes] = await Promise.all([
+            sheetsApi.getExpenses(month, year),
+            sheetsApi.getSummary(month, year)
+          ]);
+          setExpenses(eRes.expenses || []);
+          setSummary(sRes.summary || null);
+        } catch(e) { setError(e.message); }
+        finally { setLoading(false); }
+      }, [month, year]);
+
+      useEffect(() => { load(); }, [load]);
+
+      const handleAdd = async (payload) => {
+        setSaving(true);
+        try { await sheetsApi.addExpense(payload); await load(); } finally { setSaving(false); }
+      };
+      const handleDelete = async (id) => {
+        if (!confirm('למחוק הוצאה זו?')) return;
+        setDeleting(id);
+        try { await sheetsApi.deleteExpense(id); setExpenses(prev=>prev.filter(e=>e.id!==id)); } finally { setDeleting(null); }
+      };
+
+      const totalBudget = summary ? Object.values(summary.budget||{}).reduce((s,v)=>s+v,0) : 0;
+      const monthLabel  = `${MONTH_NAMES[month]} ${year}`;
+
+      return (
+        <div className="flex flex-col h-full">
+          {/* Header */}
+          <div className="px-5 pt-4 pb-5 text-white flex-shrink-0"
+               style={{ background:'linear-gradient(135deg,#1e3a5f 0%,#2f5496 100%)' }}>
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-blue-200 text-sm font-medium">{monthLabel}</p>
+              <button onClick={load} className="w-8 h-8 flex items-center justify-center rounded-full bg-white/10">
+                <Icon.Refresh size={16} spin={loading}/>
+              </button>
+            </div>
+            <div className="flex items-center gap-3 bg-white/10 rounded-2xl px-4 py-3">
+              <Icon.Clock size={20} className="text-blue-200"/>
+              <div>
+                <p className="text-white font-bold text-xl">{daysLeft()} ימים</p>
+                <p className="text-blue-200 text-xs">עד סוף החודש</p>
+              </div>
+              {summary && (
+                <div className="mr-auto text-left">
+                  <p className="text-white font-bold">{fmt(summary.totalIncome - summary.totalVariable)}</p>
+                  <p className="text-blue-200 text-xs">נשאר מהכנסות</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-4 py-4 pb-24 space-y-4">
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-2xl p-4 text-red-700 text-sm">
+                ⚠️ {error} <button onClick={load} className="underline mr-2">נסה שוב</button>
+              </div>
+            )}
+
+            {summary && (
+              <BudgetMeter spent={summary.totalVariable} budget={totalBudget||summary.totalIncome} label="הוצאות משתנות החודש"/>
+            )}
+
+            {/* Category breakdown */}
+            {summary && Object.keys(summary.byCategory||{}).length > 0 && (
+              <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+                <h3 className="text-sm font-bold text-gray-700 mb-3">פירוט לפי קטגוריה</h3>
+                <div className="space-y-2.5">
+                  {Object.entries(summary.byCategory).sort((a,b)=>b[1]-a[1]).map(([cat,amount]) => {
+                    const meta = CATEGORY_META[cat]||CATEGORY_META['אחר'];
+                    const catBudget = summary.budget?.[cat]||0;
+                    const pct = catBudget>0 ? Math.min((amount/catBudget)*100,100) : 0;
+                    return (
+                      <div key={cat}>
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-base">{meta.icon}</span>
+                            <span className="text-sm font-medium text-gray-700">{cat}</span>
+                          </div>
+                          <span className="text-sm font-bold text-gray-800">{fmt(amount)}</span>
+                        </div>
+                        {catBudget>0 && (
+                          <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                            <div className="h-full rounded-full" style={{ width:`${pct}%`, backgroundColor:meta.color }}/>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Transactions */}
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+              <div className="px-4 py-3 border-b border-gray-50">
+                <h3 className="text-sm font-bold text-gray-700">
+                  תנועות אחרונות <span className="text-gray-400 font-normal">({expenses.length})</span>
+                </h3>
+              </div>
+              {loading && <div className="flex justify-center py-10"><Spin dark/></div>}
+              {!loading && expenses.length===0 && (
+                <div className="flex flex-col items-center py-10 text-gray-400">
+                  <span className="text-4xl mb-2">🧾</span>
+                  <p className="text-sm">אין הוצאות החודש</p>
+                  <p className="text-xs mt-1">לחץ + להוספת הוצאה ראשונה</p>
+                </div>
+              )}
+              <div className="divide-y divide-gray-50">
+                {expenses.map(exp => {
+                  const meta = CATEGORY_META[exp.category]||CATEGORY_META['אחר'];
+                  return (
+                    <div key={exp.id} className="flex items-center gap-3 px-4 py-3.5">
+                      <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl flex-shrink-0"
+                           style={{ backgroundColor:meta.bg }}>{meta.icon}</div>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-semibold text-gray-800 text-sm truncate">{exp.name}</p>
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          {fmtDate(exp.date)}{exp.addedBy && ` • ${exp.addedBy}`}
+                        </p>
+                      </div>
+                      <span className="font-bold text-gray-800 text-sm">{fmt(exp.amount)}</span>
+                      <button onClick={()=>handleDelete(exp.id)} disabled={deleting===exp.id}
+                              className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-300 hover:text-red-400">
+                        {deleting===exp.id ? <Spin dark/> : <Icon.Trash/>}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* FAB */}
+          <button onClick={()=>setShowModal(true)}
+                  className="fixed bottom-24 left-5 w-14 h-14 bg-brand-800 text-white rounded-2xl shadow-xl flex items-center justify-center z-40 active:scale-95 transition-all"
+                  style={{ boxShadow:'0 8px 24px rgba(30,58,95,0.35)' }}>
+            <Icon.Plus/>
+          </button>
+
+          {showModal && <AddExpenseModal onClose={()=>setShowModal(false)} onSave={handleAdd} saving={saving}/>}
+        </div>
+      );
+    }
+
+    // ── FixedExpenses Tab ─────────────────────────
+    function FixedExpenses() {
+      const [items,    setItems]   = useState([]);
+      const [loading,  setLoading] = useState(true);
+      const [saving,   setSaving]  = useState(false);
+      const [deleting, setDeleting]= useState(null);
+      const [showAdd,  setShowAdd] = useState(false);
+      const [editing,  setEditing] = useState(null);
+
+      const load = useCallback(async () => {
+        setLoading(true);
+        try { const r = await sheetsApi.getFixed(); setItems(r.fixed||[]); } catch(e){}
+        finally { setLoading(false); }
+      }, []);
+      useEffect(()=>{ load(); },[load]);
+
+      const handleAdd = async (data) => {
+        setSaving(true);
+        try { await sheetsApi.addFixed(data); await load(); setShowAdd(false); } finally { setSaving(false); }
+      };
+      const handleUpdate = async (data) => {
+        setSaving(true);
+        try { await sheetsApi.updateFixed({ ...data, id:editing }); await load(); setEditing(null); } finally { setSaving(false); }
+      };
+      const handleDelete = async (id) => {
+        if (!confirm('למחוק?')) return;
+        setDeleting(id);
+        try { await sheetsApi.deleteFixed(id); setItems(prev=>prev.filter(i=>i.id!==id)); } finally { setDeleting(null); }
+      };
+
+      const totalMonthly    = items.filter(i=>i.frequency==='monthly').reduce((s,i)=>s+i.amount,0);
+      const totalBimonthly  = items.filter(i=>i.frequency==='bimonthly').reduce((s,i)=>s+i.amount/2,0);
+
+      function ItemForm({ initial, onSave, onCancel }) {
+        const blank = { name:'', category:'דיור', amount:'', frequency:'monthly', dayOfMonth:1, notes:'' };
+        const [form, setForm] = useState(initial||blank);
+        const s = (k,v) => setForm(f=>({...f,[k]:v}));
+        return (
+          <div className="bg-blue-50 border border-brand-200 rounded-2xl p-4 space-y-3">
+            <input type="text" placeholder="שם החיוב" value={form.name} onChange={e=>s('name',e.target.value)}
+                   className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">קטגוריה</label>
+                <select value={form.category} onChange={e=>s('category',e.target.value)}
+                        className="w-full px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-sm focus:outline-none">
+                  {CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">סכום (₪)</label>
+                <input type="number" inputMode="numeric" placeholder="0" value={form.amount} onChange={e=>s('amount',e.target.value)}
+                       className="w-full px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-sm focus:outline-none"/>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">תדירות</label>
+                <select value={form.frequency} onChange={e=>s('frequency',e.target.value)}
+                        className="w-full px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-sm focus:outline-none">
+                  {Object.entries(FREQ_LABELS).map(([k,v])=><option key={k} value={k}>{v}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">יום בחודש</label>
+                <input type="number" min="1" max="31" value={form.dayOfMonth} onChange={e=>s('dayOfMonth',+e.target.value)}
+                       className="w-full px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-sm focus:outline-none"/>
+              </div>
+            </div>
+            <input type="text" placeholder="הערות" value={form.notes} onChange={e=>s('notes',e.target.value)}
+                   className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm focus:outline-none"/>
+            <div className="flex gap-2">
+              <button onClick={()=>onSave({...form,amount:+form.amount})} disabled={saving||!form.name||!form.amount}
+                      className="flex-1 bg-brand-800 text-white py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-1.5 disabled:opacity-50">
+                {saving ? <Spin/> : <><Icon.Check size={15}/>שמור</>}
+              </button>
+              <button onClick={onCancel} className="px-4 py-2.5 rounded-xl bg-gray-100 text-gray-600">
+                <Icon.X size={15}/>
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="flex flex-col h-full">
+          <div className="px-5 pt-4 pb-5 text-white flex-shrink-0"
+               style={{ background:'linear-gradient(135deg,#1e3a5f 0%,#2f5496 100%)' }}>
+            <h1 className="text-white font-bold text-xl">הוצאות קבועות</h1>
+            <div className="flex gap-3 mt-3">
+              {[['חודשי',totalMonthly],['ממוצע דו-חודשי',totalBimonthly],['סה"כ',totalMonthly+totalBimonthly]].map(([l,v])=>(
+                <div key={l} className="flex-1 bg-white/10 rounded-xl px-2 py-2.5 text-center">
+                  <p className="text-blue-200 text-xs">{l}</p>
+                  <p className="text-white font-bold text-sm">{fmt(v)}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto px-4 py-4 pb-24 space-y-3">
+            {items.some(i=>i.frequency==='bimonthly') && (
+              <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-2xl p-3">
+                <Icon.Alert size={16} className="text-amber-500 mt-0.5 flex-shrink-0"/>
+                <p className="text-xs text-amber-700"><strong>תזכורת:</strong> חשבונות דו-חודשיים — הפרשה חודשית מומלצת.</p>
+              </div>
+            )}
+            {showAdd && <ItemForm onSave={handleAdd} onCancel={()=>setShowAdd(false)}/>}
+            {loading && <div className="flex justify-center py-10"><Spin dark/></div>}
+            {!loading && items.length===0 && !showAdd && (
+              <div className="flex flex-col items-center py-12 text-gray-400">
+                <span className="text-5xl mb-3">🔄</span>
+                <p className="text-sm">אין חיובים קבועים עדיין</p>
+              </div>
+            )}
+            {items.map(item => {
+              const meta = CATEGORY_META[item.category]||CATEGORY_META['אחר'];
+              const today = new Date().getDate();
+              const upcoming = item.dayOfMonth>=today && item.dayOfMonth<=today+7;
+              return editing===item.id
+                ? <ItemForm key={item.id} initial={item} onSave={handleUpdate} onCancel={()=>setEditing(null)}/>
+                : (
+                  <div key={item.id} className={`bg-white rounded-2xl p-4 shadow-sm border transition ${upcoming?'border-amber-300':'border-gray-100'}`}>
+                    <div className="flex items-start gap-3">
+                      <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl flex-shrink-0"
+                           style={{ backgroundColor:meta.bg }}>{meta.icon}</div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <p className="font-bold text-gray-800">{item.name}</p>
+                          {upcoming && <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">בקרוב</span>}
+                        </div>
+                        <p className="text-xs text-gray-400 mt-1">{item.category} • {FREQ_LABELS[item.frequency]} • יום {item.dayOfMonth}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-gray-800">{fmt(item.amount)}</span>
+                        <button onClick={()=>setEditing(item.id)} className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-300 hover:text-brand-600">
+                          <Icon.Edit/>
+                        </button>
+                        <button onClick={()=>handleDelete(item.id)} disabled={deleting===item.id}
+                                className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-300 hover:text-red-400">
+                          {deleting===item.id ? <Spin dark/> : <Icon.Trash/>}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+            })}
+          </div>
+          {!showAdd && (
+            <button onClick={()=>setShowAdd(true)}
+                    className="fixed bottom-24 left-5 w-14 h-14 bg-brand-800 text-white rounded-2xl shadow-xl flex items-center justify-center z-40"
+                    style={{ boxShadow:'0 8px 24px rgba(30,58,95,0.35)' }}>
+              <Icon.Plus/>
+            </button>
+          )}
+        </div>
+      );
+    }
+
+    // ── Income Tab ────────────────────────────────
+    function Income() {
+      const [items,  setItems]  = useState([]);
+      const [loading,setLoading]= useState(true);
+      const [saving, setSaving] = useState(false);
+      const [dirty,  setDirty]  = useState(false);
+      const uid = () => Math.random().toString(36).slice(2);
+
+      useEffect(()=>{
+        sheetsApi.getIncome().then(r=>{ setItems(r.income||[]); setLoading(false); }).catch(()=>setLoading(false));
+      },[]);
+
+      const s = (idx,k,v) => { setItems(prev=>prev.map((it,i)=>i===idx?{...it,[k]:v}:it)); setDirty(true); };
+      const add = () => { setItems(prev=>[...prev,{id:uid(),name:'',amount:'',frequency:'monthly',notes:''}]); setDirty(true); };
+      const rem = (idx) => { setItems(prev=>prev.filter((_,i)=>i!==idx)); setDirty(true); };
+      const save = async () => {
+        setSaving(true);
+        try { await sheetsApi.saveIncome(items.map(it=>({...it,amount:+it.amount})).filter(it=>it.name&&it.amount>0)); setDirty(false); }
+        finally { setSaving(false); }
+      };
+      const totalMonthly = items.filter(i=>i.frequency==='monthly').reduce((s,i)=>s+(+i.amount||0),0);
+
+      return (
+        <div className="flex flex-col h-full">
+          <div className="px-5 pt-4 pb-5 text-white flex-shrink-0"
+               style={{ background:'linear-gradient(135deg,#1e3a5f 0%,#2f5496 100%)' }}>
+            <h1 className="text-white font-bold text-xl">הכנסות</h1>
+            <div className="flex gap-3 mt-3">
+              <div className="flex-1 bg-white/10 rounded-xl px-3 py-2.5 text-center">
+                <p className="text-blue-200 text-xs">סה"כ חודשי</p>
+                <p className="text-white font-bold text-xl">{fmt(totalMonthly)}</p>
+              </div>
+              <div className="flex-1 bg-white/10 rounded-xl px-3 py-2.5 text-center">
+                <p className="text-blue-200 text-xs">מקורות</p>
+                <p className="text-white font-bold text-xl">{items.length}</p>
+              </div>
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto px-4 py-4 pb-28 space-y-3">
+            {loading && <div className="flex justify-center py-10"><Spin dark/></div>}
+            {!loading && items.length===0 && <div className="flex flex-col items-center py-12 text-gray-400"><span className="text-5xl mb-3">💰</span><p className="text-sm">הוסיפו מקורות הכנסה</p></div>}
+            {items.map((item,idx)=>(
+              <div key={item.id||idx} className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 space-y-3">
+                <div className="flex items-center gap-2">
+                  <input type="text" placeholder="שם מקור ההכנסה" value={item.name} onChange={e=>s(idx,'name',e.target.value)}
+                         className="flex-1 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+                  <button onClick={()=>rem(idx)} className="w-9 h-9 flex items-center justify-center rounded-xl text-gray-300 hover:text-red-400">
+                    <Icon.Trash size={16}/>
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input type="number" inputMode="numeric" placeholder="סכום ₪" value={item.amount} onChange={e=>s(idx,'amount',e.target.value)}
+                         className="px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+                  <select value={item.frequency} onChange={e=>s(idx,'frequency',e.target.value)}
+                          className="px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm focus:outline-none">
+                    {Object.entries(FREQ_LABELS).map(([k,v])=><option key={k} value={k}>{v}</option>)}
+                  </select>
+                </div>
+              </div>
+            ))}
+            <button onClick={add}
+                    className="w-full py-3.5 rounded-2xl border-2 border-dashed border-brand-200 text-brand-600 font-semibold text-sm flex items-center justify-center gap-2 hover:bg-brand-50">
+              <Icon.Plus/> הוספת מקור הכנסה
+            </button>
+          </div>
+          {dirty && (
+            <div className="fixed bottom-20 left-0 right-0 px-4 z-40">
+              <button onClick={save} disabled={saving}
+                      className="w-full max-w-lg mx-auto block bg-emerald-600 text-white py-4 rounded-2xl font-bold text-base shadow-xl flex items-center justify-center gap-2 disabled:opacity-50">
+                {saving ? <Spin/> : <><Icon.Check size={18}/>שמור שינויים</>}
+              </button>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── Settings Tab ──────────────────────────────
+    function SettingsTab() {
+      const [budget,  setBudget]  = useState({});
+      const [summary, setSummary] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [saving,  setSaving]  = useState(false);
+      const [dirty,   setDirty]   = useState(false);
+      const [initMsg, setInitMsg] = useState('');
+
+      useEffect(()=>{
+        const now = new Date();
+        Promise.all([
+          sheetsApi.getBudget(),
+          sheetsApi.getSummary(now.getMonth()+1, now.getFullYear())
+        ]).then(([b,s])=>{ setBudget(b.budget||{}); setSummary(s.summary||null); setLoading(false); })
+          .catch(()=>setLoading(false));
+      },[]);
+
+      const setVal = (cat,v) => { setBudget(b=>({...b,[cat]:v})); setDirty(true); };
+      const handleSave = async () => {
+        setSaving(true);
+        try {
+          const cleaned = {};
+          Object.entries(budget).forEach(([k,v])=>{ if(+v>0) cleaned[k]=+v; });
+          await sheetsApi.saveBudget(cleaned);
+          setDirty(false);
+        } finally { setSaving(false); }
+      };
+      const handleInit = async () => {
+        try { await sheetsApi.init(); setInitMsg('✅ הגיליון אותחל בהצלחה!'); }
+        catch(e) { setInitMsg('❌ שגיאה: '+e.message); }
+      };
+      const totalBudget = Object.values(budget).reduce((s,v)=>s+(+v||0),0);
+
+      return (
+        <div className="flex flex-col h-full">
+          <div className="px-5 pt-4 pb-5 text-white flex-shrink-0"
+               style={{ background:'linear-gradient(135deg,#1e3a5f 0%,#2f5496 100%)' }}>
+            <h1 className="text-white font-bold text-xl">הגדרות וסיכום</h1>
+            <p className="text-blue-200 text-sm mt-1">הגדרת יעדי תקציב לפי קטגוריה</p>
+          </div>
+          <div className="flex-1 overflow-y-auto px-4 py-4 pb-28 space-y-4">
+            {/* Summary */}
+            {summary && (
+              <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+                <h3 className="text-sm font-bold text-gray-700 mb-3">סיכום חודשי</h3>
+                <div className="grid grid-cols-2 gap-3">
+                  {[['הכנסות',summary.totalIncome,'text-emerald-600'],
+                    ['הוצאות משתנות',summary.totalVariable,'text-red-500'],
+                    ['הוצאות קבועות',summary.totalFixed,'text-orange-500'],
+                    ['מאזן',summary.balance,summary.balance>=0?'text-emerald-600':'text-red-500']
+                  ].map(([l,v,c])=>(
+                    <div key={l} className="bg-gray-50 rounded-xl p-3">
+                      <p className="text-xs text-gray-500">{l}</p>
+                      <p className={`font-bold text-lg mt-0.5 ${c}`}>{fmt(v)}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Budget */}
+            <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-bold text-gray-700">תקציב לפי קטגוריה</h3>
+                <span className="text-xs text-gray-400">סה"כ: {fmt(totalBudget)}</span>
+              </div>
+              {loading ? <div className="flex justify-center py-8"><Spin dark/></div> : (
+                <div className="space-y-2.5">
+                  {CATEGORIES.map(cat => {
+                    const meta  = CATEGORY_META[cat];
+                    const spent = summary?.byCategory?.[cat]||0;
+                    const bgt   = +(budget[cat]||0);
+                    const over  = bgt>0 && spent>bgt;
+                    return (
+                      <div key={cat} className="flex items-center gap-3">
+                        <span className="text-xl w-8 text-center">{meta.icon}</span>
+                        <label className="flex-1 text-sm font-medium text-gray-700">{cat}</label>
+                        {spent>0 && <span className={`text-xs font-medium ${over?'text-red-500':'text-gray-400'}`}>{fmt(spent)}</span>}
+                        <div className="relative">
+                          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">₪</span>
+                          <input type="number" inputMode="numeric" placeholder="0"
+                                 value={budget[cat]||''} onChange={e=>setVal(cat,e.target.value)}
+                                 className={`w-28 pl-3 pr-8 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 ${over?'border-red-300 bg-red-50':'border-gray-200 bg-gray-50'}`}/>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            {/* Init */}
+            <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+              <h3 className="text-sm font-bold text-gray-700 mb-2">הגדרות מתקדמות</h3>
+              <p className="text-xs text-gray-500 mb-3">בפעם הראשונה בלבד — אתחול גיליונות:</p>
+              <button onClick={handleInit}
+                      className="w-full py-3 rounded-xl bg-gray-100 text-gray-700 font-semibold text-sm flex items-center justify-center gap-2 hover:bg-gray-200">
+                <Icon.Refresh size={15}/> אתחל גיליון
+              </button>
+              {initMsg && <p className="text-xs mt-2 text-center">{initMsg}</p>}
+            </div>
+            <p className="text-center text-xs text-gray-400 pb-2">ביחד © {new Date().getFullYear()} · נתונים נשמרים ב-Google Sheets</p>
+          </div>
+          {dirty && (
+            <div className="fixed bottom-20 left-0 right-0 px-4 z-40">
+              <button onClick={handleSave} disabled={saving}
+                      className="w-full max-w-lg mx-auto block bg-brand-800 text-white py-4 rounded-2xl font-bold text-base shadow-xl flex items-center justify-center gap-2 disabled:opacity-50">
+                {saving ? <Spin/> : <><Icon.Check size={18}/>שמור תקציב</>}
+              </button>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── Setup Banner ──────────────────────────────
+    function SetupBanner() {
+      return (
+        <div className="bg-amber-500 text-white text-center text-xs py-2 px-4 flex-shrink-0">
+          ⚙️ ערוך את קובץ index.html ושנה <strong>YOUR_SCRIPT_ID</strong> לכתובת ה-Apps Script שלך
+        </div>
+      );
+    }
+
+    // ── Main App ──────────────────────────────────
+    const TABS = [
+      { id:'dashboard', label:'דשבורד',  TabIcon: ({a})=><Icon.Home  size={22} active={a}/>, Component:Dashboard      },
+      { id:'fixed',     label:'קבועות',  TabIcon: ({a})=><Icon.Repeat size={22} active={a}/>, Component:FixedExpenses },
+      { id:'income',    label:'הכנסות',  TabIcon: ({a})=><Icon.TrendUp size={22} active={a}/>, Component:Income      },
+      { id:'settings',  label:'הגדרות',  TabIcon: ({a})=><Icon.Settings size={22} active={a}/>, Component:SettingsTab},
+    ];
+
+    function App() {
+      const [activeTab, setActiveTab] = useState('dashboard');
+      const isSetup = API_URL.includes('YOUR_SCRIPT_ID');
+      const { Component } = TABS.find(t=>t.id===activeTab);
+
+      return (
+        <div className="flex flex-col h-screen max-w-lg mx-auto overflow-hidden bg-gray-50"
+             style={{ fontFamily:"'Assistant',sans-serif" }}>
+          {isSetup && <SetupBanner/>}
+
+          {/* Logo Header */}
+          <header className="flex-shrink-0 flex items-center justify-center bg-white border-b border-gray-100"
+                  style={{ height:'52px', paddingTop:'env(safe-area-inset-top,0px)' }}>
+            <Logo size={38}/>
+          </header>
+
+          {/* Content */}
+          <main className="flex-1 overflow-hidden relative">
+            <Component key={activeTab}/>
+          </main>
+
+          {/* Bottom Nav */}
+          <nav className="flex-shrink-0 bg-white border-t border-gray-100 shadow-[0_-4px_20px_rgba(0,0,0,0.06)]"
+               style={{ paddingBottom:'env(safe-area-inset-bottom,0px)' }}>
+            <div className="flex">
+              {TABS.map(({ id, label, TabIcon }) => {
+                const active = activeTab===id;
+                return (
+                  <button key={id} onClick={()=>setActiveTab(id)}
+                          className={`flex-1 flex flex-col items-center justify-center py-3 gap-0.5 transition-all ${active?'text-brand-800':'text-gray-400'}`}>
+                    <div className={`relative transition-transform ${active?'scale-110':''}`}>
+                      <TabIcon a={active}/>
+                      {active && <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full bg-brand-800"/>}
+                    </div>
+                    <span className={`text-xs mt-0.5 ${active?'font-bold':'font-medium'}`}>{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </nav>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+  </script>
+
+</body>
+</html>
