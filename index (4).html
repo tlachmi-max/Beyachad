@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
+  <meta name="theme-color" content="#1e3a5f"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <title>ביחד – ניהול תזרים משפחתי</title>
+  <link href="https://fonts.googleapis.com/css2?family=Assistant:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config={theme:{extend:{fontFamily:{sans:['Assistant','sans-serif']},colors:{brand:{50:'#eef2ff',100:'#e0e7ff',200:'#c7d2fe',500:'#3b5bdb',600:'#2f4ac4',700:'#1e3a8a',800:'#1e3a5f',900:'#0f2040'}}}}}</script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async></script>
+  <style>
+    *{direction:rtl;-webkit-tap-highlight-color:transparent;box-sizing:border-box}
+    html,body,#root{height:100%;overflow:hidden}
+    body{font-family:'Assistant',sans-serif;background:#f8fafc;-webkit-font-smoothing:antialiased}
+    ::-webkit-scrollbar{display:none} *{scrollbar-width:none}
+    input[type=number]{direction:ltr;text-align:right}
+    input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+    .overflow-y-auto{-webkit-overflow-scrolling:touch}
+    @keyframes slideUp{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}
+    .slide-up{animation:slideUp .3s ease}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+    .fade-in{animation:fadeIn .4s ease}
+    .spin{animation:spin .7s linear infinite}
+    .spinner{display:inline-block;width:20px;height:20px;border:2px solid rgba(255,255,255,.3);border-top-color:white;border-radius:50%;animation:spin .7s linear infinite}
+    .spinner-dark{border-color:rgba(30,58,95,.15);border-top-color:#1e3a5f}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+    .pulse{animation:pulse 1.5s ease infinite}
+  </style>
+</head>
+<body><div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+// ══════════════════════════════════════════════
+// ⚙️  שנה כאן — Client ID מ-Google Cloud Console
+// ══════════════════════════════════════════════
+const CLIENT_ID = 'YOUR_CLIENT_ID.apps.googleusercontent.com';
+
+const LS={SHEET:'byd_sheet',TOKEN:'byd_tok',EXPIRY:'byd_exp',USER:'byd_user'};
+
+// ── Auth ──────────────────────────────────────
+let _tc=null,_tok=null,_exp=0,_res=null;
+function authInit(cb){
+  const t=setInterval(()=>{
+    if(!window.google?.accounts?.oauth2) return;
+    clearInterval(t);
+    _tc=google.accounts.oauth2.initTokenClient({
+      client_id:CLIENT_ID,
+      scope:'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file',
+      callback:(r)=>{
+        if(r.error){if(_res){_res(null);_res=null;}return;}
+        _tok=r.access_token;_exp=Date.now()+r.expires_in*1000;
+        localStorage.setItem(LS.TOKEN,_tok);localStorage.setItem(LS.EXPIRY,_exp);
+        if(_res){_res(_tok);_res=null;}
+      }
+    });
+    const s=localStorage.getItem(LS.TOKEN),e=parseInt(localStorage.getItem(LS.EXPIRY)||'0');
+    if(s&&Date.now()<e-30000){_tok=s;_exp=e;}
+    cb();
+  },100);
+}
+function getToken(){
+  if(_tok&&Date.now()<_exp-30000) return Promise.resolve(_tok);
+  return new Promise(r=>{_res=r;_tc.requestAccessToken({prompt:''});});
+}
+function signIn(){return new Promise(r=>{_res=r;_tc.requestAccessToken({prompt:'select_account'});});}
+function signOut(){
+  if(_tok) try{google.accounts.oauth2.revoke(_tok,()=>{});}catch(e){}
+  _tok=null;_exp=0;Object.values(LS).forEach(k=>localStorage.removeItem(k));
+}
+
+// ── APIs ──────────────────────────────────────
+const SHEETS='https://sheets.googleapis.com/v4/spreadsheets';
+const DRIVE='https://www.googleapis.com/drive/v3';
+async function gapi(url,opts={}){
+  const tok=await getToken();
+  if(!tok) throw new Error('לא מחובר');
+  const res=await fetch(url,{...opts,headers:{Authorization:`Bearer ${tok}`,'Content-Type':'application/json',...(opts.headers||{})}});
+  if(res.status===204) return {};
+  const d=await res.json();
+  if(!res.ok) throw new Error(d.error?.message||`שגיאה ${res.status}`);
+  return d;
+}
+async function createSpreadsheet(){
+  return gapi(SHEETS,{method:'POST',body:JSON.stringify({
+    properties:{title:'ביחד – תזרים משפחתי 🏠'},
+    sheets:[{properties:{sheetId:0,title:'הוצאות',index:0}},{properties:{sheetId:1,title:'קבועות',index:1}},{properties:{sheetId:2,title:'הכנסות',index:2}},{properties:{sheetId:3,title:'תקציב',index:3}}]
+  })});
+}
+async function initHeaders(sid){
+  const sets=[
+    ['הוצאות!A1:G1',[['ID','תאריך','שם','קטגוריה','סכום','הערות','נוסף על ידי']]],
+    ['קבועות!A1:G1',[['ID','שם','קטגוריה','סכום','תדירות','יום בחודש','הערות']]],
+    ['הכנסות!A1:E1',[['ID','שם','סכום','תדירות','הערות']]],
+    ['תקציב!A1:B1',[['קטגוריה','תקציב חודשי']]]
+  ];
+  for(const [r,v] of sets) await gapi(`${SHEETS}/${sid}/values/${encodeURIComponent(r)}?valueInputOption=RAW`,{method:'PUT',body:JSON.stringify({values:v})});
+}
+async function readRange(sid,r){const d=await gapi(`${SHEETS}/${sid}/values/${encodeURIComponent(r)}`);return d.values||[];}
+async function appendRow(sid,sheet,row){return gapi(`${SHEETS}/${sid}/values/${encodeURIComponent(sheet+'!A:A')}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,{method:'POST',body:JSON.stringify({values:[row]})});}
+async function deleteRowById(sid,sheetName,id){
+  const vals=await readRange(sid,`${sheetName}!A:A`);
+  const ri=vals.findIndex((r,i)=>i>0&&r[0]===id);
+  if(ri===-1) return;
+  const info=await gapi(`${SHEETS}/${sid}?fields=sheets.properties`);
+  const gid=info.sheets?.find(s=>s.properties.title===sheetName)?.properties?.sheetId??0;
+  return gapi(`${SHEETS}/${sid}:batchUpdate`,{method:'POST',body:JSON.stringify({requests:[{deleteDimension:{range:{sheetId:gid,dimension:'ROWS',startIndex:ri,endIndex:ri+1}}}]})});
+}
+async function overwriteSheet(sid,name,header,rows){
+  await gapi(`${SHEETS}/${sid}/values/${encodeURIComponent(name+'!A:Z')}:clear`,{method:'POST'});
+  return gapi(`${SHEETS}/${sid}/values/${encodeURIComponent(name+'!A1')}?valueInputOption=USER_ENTERED`,{method:'PUT',body:JSON.stringify({values:[header,...rows]})});
+}
+async function shareFile(fid,email){return gapi(`${DRIVE}/files/${fid}/permissions`,{method:'POST',body:JSON.stringify({type:'user',role:'writer',emailAddress:email,sendNotificationEmail:true})});}
+
+// ── Helpers ───────────────────────────────────
+const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2);
+const todayISO=()=>new Date().toISOString().split('T')[0];
+const fmt=n=>new Intl.NumberFormat('he-IL',{style:'currency',currency:'ILS',maximumFractionDigits:0}).format(n||0);
+const fmtDate=iso=>{if(!iso)return'';const d=new Date(iso);return d.toLocaleDateString('he-IL',{day:'2-digit',month:'2-digit',year:'numeric'});};
+const CATS=['סופר','רכב','דיור','חינוך','פנאי','רפואה','אחזקת בית','מיסים','אחר'];
+const CM={סופר:{i:'🛒',c:'#10b981',b:'#d1fae5'},רכב:{i:'🚗',c:'#3b82f6',b:'#dbeafe'},דיור:{i:'🏠',c:'#8b5cf6',b:'#ede9fe'},חינוך:{i:'📚',c:'#f59e0b',b:'#fef3c7'},פנאי:{i:'🎭',c:'#ec4899',b:'#fce7f3'},רפואה:{i:'💊',c:'#ef4444',b:'#fee2e2'},'אחזקת בית':{i:'🔧',c:'#6b7280',b:'#f3f4f6'},מיסים:{i:'📋',c:'#14b8a6',b:'#ccfbf1'},אחר:{i:'📌',c:'#94a3b8',b:'#f8fafc'}};
+const FREQ={monthly:'חודשי',bimonthly:'דו-חודשי',quarterly:'רבעוני',yearly:'שנתי'};
+const MN=['','ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
+const parseExp=rows=>rows.slice(1).filter(r=>r[0]).map(r=>({id:r[0],date:r[1]||'',name:r[2]||'',category:r[3]||'אחר',amount:parseFloat(r[4])||0,notes:r[5]||'',addedBy:r[6]||''}));
+const parseFix=rows=>rows.slice(1).filter(r=>r[0]).map(r=>({id:r[0],name:r[1]||'',category:r[2]||'אחר',amount:parseFloat(r[3])||0,frequency:r[4]||'monthly',dayOfMonth:parseInt(r[5])||1,notes:r[6]||''}));
+const parseInc=rows=>rows.slice(1).filter(r=>r[0]).map(r=>({id:r[0],name:r[1]||'',amount:parseFloat(r[2])||0,frequency:r[3]||'monthly',notes:r[4]||''}));
+const parseBud=rows=>{const b={};rows.slice(1).forEach(r=>{if(r[0])b[r[0]]=parseFloat(r[1])||0;});return b;};
+const daysLeft=()=>{const n=new Date();return new Date(n.getFullYear(),n.getMonth()+1,0).getDate()-n.getDate();};
+
+// ── Icons ─────────────────────────────────────
+const sv=(d,s=18)=><svg xmlns="http://www.w3.org/2000/svg" width={s} height={s} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" dangerouslySetInnerHTML={{__html:d}}/>;
+const I={
+  Plus:  ()=>sv('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',24),
+  X:     ({s=18})=>sv('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',s),
+  Check: ({s=18})=>sv('<polyline points="20 6 9 17 4 12"/>',s),
+  Trash: ({s=14})=>sv('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6M9 6V4h6v2"/>',s),
+  Edit:  ({s=13})=>sv('<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>',s),
+  Share: ({s=16})=>sv('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>',s),
+  Ref:   ({s=16,spin=false})=><svg xmlns="http://www.w3.org/2000/svg" width={s} height={s} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" className={spin?'spin':''}><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>,
+  Clock: ({s=20})=>sv('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',s),
+  Logout:({s=18})=>sv('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',s),
+  NH: ({a})=><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="none" stroke="currentColor" strokeWidth={a?2.2:1.8} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
+  NR: ({a})=><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="none" stroke="currentColor" strokeWidth={a?2.2:1.8} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>,
+  NT: ({a})=><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="none" stroke="currentColor" strokeWidth={a?2.2:1.8} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>,
+  NS: ({a})=><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="none" stroke="currentColor" strokeWidth={a?2.2:1.8} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+};
+const Spin=({dark=false})=><span className={`spinner ${dark?'spinner-dark':''}`}/>;
+
+function Logo({size=38}){
+  return <svg width={size} height={size} viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M12 40 L40 12 L68 40 L68 70 Q68 72 66 72 L14 72 Q12 72 12 70 Z" stroke="#1e5f5a" strokeWidth="4.5" fill="none" strokeLinejoin="round" strokeLinecap="round"/>
+    <polyline points="20,60 30,46 40,52 52,38 64,24" stroke="#1e5f5a" strokeWidth="4" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+    <polyline points="55,22 64,24 62,33" stroke="#1e5f5a" strokeWidth="4" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+    <circle cx="30" cy="46" r="3" fill="#1e5f5a"/><circle cx="40" cy="52" r="3" fill="#1e5f5a"/><circle cx="52" cy="38" r="3" fill="#1e5f5a"/>
+  </svg>;
+}
+
+function BudgetMeter({spent,budget,label}){
+  const pct=budget>0?Math.min((spent/budget)*100,100):0;
+  const over=budget>0&&spent>budget;
+  const bar=over?'#ef4444':pct>80?'#f59e0b':'#10b981';
+  return <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+    <div className="flex justify-between items-start mb-3">
+      <div><p className="text-xs text-gray-500">{label}</p><p className="text-2xl font-bold text-brand-800 mt-0.5">{fmt(spent)}</p></div>
+      <div className="text-left"><p className="text-xs text-gray-500">מתוך {fmt(budget)}</p><p className={`text-sm font-bold mt-0.5 ${over?'text-red-500':'text-emerald-600'}`}>{over?`חרגתם ב-${fmt(spent-budget)}`:`נשאר ${fmt(budget-spent)}`}</p></div>
+    </div>
+    <div className="h-3 bg-gray-100 rounded-full overflow-hidden"><div className="h-full rounded-full transition-all duration-700" style={{width:`${pct}%`,backgroundColor:bar}}/></div>
+    <div className="flex justify-between mt-1"><span className="text-xs text-gray-400">0%</span><span className={`text-xs font-semibold ${over?'text-red-500':'text-gray-500'}`}>{pct.toFixed(0)}%</span><span className="text-xs text-gray-400">100%</span></div>
+  </div>;
+}
+
+function AddExpenseModal({onClose,onSave,saving,user}){
+  const [f,setF]=useState({name:'',category:'סופר',amount:'',date:todayISO(),notes:'',addedBy:user||''});
+  const [err,setErr]=useState({});
+  const s=(k,v)=>setF(p=>({...p,[k]:v}));
+  const go=async()=>{
+    const e={};if(!f.name.trim())e.name='נדרש שם';if(!f.amount||+f.amount<=0)e.amount='נדרש סכום';
+    setErr(e);if(Object.keys(e).length) return;
+    await onSave({...f,amount:+f.amount});onClose();
+  };
+  return <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="w-full max-w-lg bg-white rounded-t-3xl shadow-2xl slide-up" style={{maxHeight:'90vh',overflowY:'auto'}}>
+      <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-gray-100">
+        <button onClick={onClose} className="w-9 h-9 flex items-center justify-center rounded-full bg-gray-100 text-gray-500"><I.X/></button>
+        <h2 className="text-lg font-bold text-brand-800">הוספת הוצאה</h2><div className="w-9"/>
+      </div>
+      <div className="px-5 py-4 space-y-4">
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-1.5">שם ההוצאה *</label>
+          <input type="text" value={f.name} onChange={e=>s('name',e.target.value)} placeholder="למשל: קניות שוק" className={`w-full px-4 py-3 rounded-xl border text-base focus:outline-none focus:ring-2 focus:ring-brand-500 ${err.name?'border-red-400 bg-red-50':'border-gray-200 bg-gray-50'}`}/>
+          {err.name&&<p className="text-red-500 text-xs mt-1">{err.name}</p>}
+        </div>
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">קטגוריה</label>
+          <div className="grid grid-cols-3 gap-2">
+            {CATS.map(cat=><button key={cat} onClick={()=>s('category',cat)} className={`flex flex-col items-center gap-1 py-2.5 px-2 rounded-xl border-2 text-xs font-semibold transition-all ${f.category===cat?'border-brand-500 bg-brand-50 text-brand-800':'border-gray-100 bg-gray-50 text-gray-600'}`}>
+              <span className="text-xl">{CM[cat].i}</span><span>{cat}</span>
+            </button>)}
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-1.5">סכום (₪) *</label>
+            <input type="number" inputMode="numeric" value={f.amount} onChange={e=>s('amount',e.target.value)} placeholder="0" className={`w-full px-4 py-3 rounded-xl border text-base focus:outline-none focus:ring-2 focus:ring-brand-500 ${err.amount?'border-red-400 bg-red-50':'border-gray-200 bg-gray-50'}`}/>
+            {err.amount&&<p className="text-red-500 text-xs mt-1">{err.amount}</p>}
+          </div>
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-1.5">תאריך</label>
+            <input type="date" value={f.date} onChange={e=>s('date',e.target.value)} className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-base focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+          </div>
+        </div>
+        <input type="text" value={f.addedBy} onChange={e=>s('addedBy',e.target.value)} placeholder="נוסף על ידי" className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-base focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+        <textarea value={f.notes} onChange={e=>s('notes',e.target.value)} rows={2} placeholder="הערות (אופציונלי)" className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-base focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none"/>
+        <button onClick={go} disabled={saving} className="w-full bg-brand-800 text-white py-4 rounded-2xl font-bold text-base flex items-center justify-center gap-2 hover:bg-brand-700 active:scale-95 transition-all disabled:opacity-50 mb-6">
+          {saving?<Spin/>:<><I.Check s={18}/> שמור הוצאה</>}
+        </button>
+      </div>
+    </div>
+  </div>;
+}
+
+function ShareModal({sheetId,onClose}){
+  const [email,setEmail]=useState('');const [st,setSt]=useState('idle');const [msg,setMsg]=useState('');
+  const go=async()=>{
+    if(!email.trim()) return;setSt('loading');
+    try{await shareFile(sheetId,email.trim());setSt('done');setMsg('✅ ההזמנה נשלחה! בן/בת הזוג יקבל אימייל.');}
+    catch(e){setSt('error');setMsg('❌ שגיאה: '+e.message);}
+  };
+  return <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="w-full max-w-lg bg-white rounded-t-3xl shadow-2xl slide-up p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <button onClick={onClose} className="w-9 h-9 flex items-center justify-center rounded-full bg-gray-100"><I.X/></button>
+        <h2 className="text-lg font-bold text-brand-800">שיתוף עם בן/בת הזוג</h2><div className="w-9"/>
+      </div>
+      <p className="text-sm text-gray-500 text-center">בן/בת הזוג יוכלו לצפות ולערוך את הנתונים.</p>
+      <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="כתובת האימייל" className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-base focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+      {msg&&<p className="text-sm text-center">{msg}</p>}
+      {st==='done'
+        ?<button onClick={onClose} className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 mb-4"><I.Check s={18}/> סגור</button>
+        :<button onClick={go} disabled={st==='loading'||!email.trim()} className="w-full bg-brand-800 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 mb-4">
+          {st==='loading'?<Spin/>:<><I.Share s={16}/> שלח הזמנה</>}
+        </button>}
+    </div>
+  </div>;
+}
+
+function Dashboard({sheetId,user}){
+  const now=new Date();const [month]=useState(now.getMonth()+1);const [year]=useState(now.getFullYear());
+  const [expenses,setExpenses]=useState([]);const [budget,setBudget]=useState({});const [income,setIncome]=useState([]);
+  const [loading,setLoading]=useState(true);const [err,setErr]=useState(null);
+  const [showModal,setShowModal]=useState(false);const [saving,setSaving]=useState(false);const [deleting,setDeleting]=useState(null);
+  const load=useCallback(async()=>{
+    setLoading(true);setErr(null);
+    try{
+      const [eR,bR,iR]=await Promise.all([readRange(sheetId,'הוצאות!A:G'),readRange(sheetId,'תקציב!A:B'),readRange(sheetId,'הכנסות!A:E')]);
+      const all=parseExp(eR).filter(e=>{const d=new Date(e.date);return(d.getMonth()+1)===month&&d.getFullYear()===year;});
+      all.sort((a,b)=>new Date(b.date)-new Date(a.date));
+      setExpenses(all);setBudget(parseBud(bR));setIncome(parseInc(iR));
+    }catch(e){setErr(e.message);}finally{setLoading(false);}
+  },[sheetId,month,year]);
+  useEffect(()=>{load();},[load]);
+  const handleAdd=async(p)=>{
+    setSaving(true);
+    try{await appendRow(sheetId,'הוצאות',[uid(),p.date,p.name,p.category,p.amount,p.notes,p.addedBy]);await load();}
+    finally{setSaving(false);}
+  };
+  const handleDel=async(id)=>{
+    if(!confirm('למחוק?')) return;setDeleting(id);
+    try{await deleteRowById(sheetId,'הוצאות',id);setExpenses(p=>p.filter(e=>e.id!==id));}
+    catch(e){alert(e.message);}finally{setDeleting(null);}
+  };
+  const spent=expenses.reduce((s,e)=>s+e.amount,0);
+  const bgt=Object.values(budget).reduce((s,v)=>s+v,0);
+  const inc=income.filter(i=>i.frequency==='monthly').reduce((s,i)=>s+i.amount,0);
+  const byCat={};expenses.forEach(e=>{byCat[e.category]=(byCat[e.category]||0)+e.amount;});
+  return <div className="flex flex-col h-full">
+    <div className="px-5 pt-4 pb-5 text-white flex-shrink-0" style={{background:'linear-gradient(135deg,#1e3a5f,#2f5496)'}}>
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-blue-200 text-sm font-medium">{MN[month]} {year}</p>
+        <button onClick={load} className="w-8 h-8 flex items-center justify-center rounded-full bg-white/10"><I.Ref s={16} spin={loading}/></button>
+      </div>
+      <div className="flex items-center gap-3 bg-white/10 rounded-2xl px-4 py-3">
+        <I.Clock s={20}/>
+        <div><p className="text-white font-bold text-xl">{daysLeft()} ימים</p><p className="text-blue-200 text-xs">עד סוף החודש</p></div>
+        <div className="mr-auto text-left"><p className="text-white font-bold">{fmt(inc-spent)}</p><p className="text-blue-200 text-xs">נשאר מהכנסות</p></div>
+      </div>
+    </div>
+    <div className="flex-1 overflow-y-auto px-4 py-4 pb-24 space-y-4">
+      {err&&<div className="bg-red-50 border border-red-200 rounded-2xl p-4 text-red-700 text-sm">⚠️ {err} <button onClick={load} className="underline mr-2">נסה שוב</button></div>}
+      <BudgetMeter spent={spent} budget={bgt||inc} label="הוצאות משתנות החודש"/>
+      {Object.keys(byCat).length>0&&<div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+        <h3 className="text-sm font-bold text-gray-700 mb-3">פירוט לפי קטגוריה</h3>
+        <div className="space-y-2.5">
+          {Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>{
+            const m=CM[cat]||CM['אחר'];const b=budget[cat]||0;const pct=b>0?Math.min((amt/b)*100,100):0;
+            return <div key={cat}>
+              <div className="flex items-center justify-between mb-1"><div className="flex items-center gap-2"><span className="text-base">{m.i}</span><span className="text-sm font-medium text-gray-700">{cat}</span></div><span className="text-sm font-bold text-gray-800">{fmt(amt)}</span></div>
+              {b>0&&<div className="h-1.5 bg-gray-100 rounded-full overflow-hidden"><div className="h-full rounded-full" style={{width:`${pct}%`,backgroundColor:m.c}}/></div>}
+            </div>;
+          })}
+        </div>
+      </div>}
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-50"><h3 className="text-sm font-bold text-gray-700">תנועות אחרונות <span className="text-gray-400 font-normal">({expenses.length})</span></h3></div>
+        {loading&&<div className="flex justify-center py-10"><Spin dark/></div>}
+        {!loading&&expenses.length===0&&<div className="flex flex-col items-center py-10 text-gray-400"><span className="text-4xl mb-2">🧾</span><p className="text-sm">אין הוצאות החודש</p></div>}
+        <div className="divide-y divide-gray-50">
+          {expenses.map(exp=>{const m=CM[exp.category]||CM['אחר'];return <div key={exp.id} className="flex items-center gap-3 px-4 py-3.5">
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl flex-shrink-0" style={{backgroundColor:m.b}}>{m.i}</div>
+            <div className="flex-1 min-w-0"><p className="font-semibold text-gray-800 text-sm truncate">{exp.name}</p><p className="text-xs text-gray-400 mt-0.5">{fmtDate(exp.date)}{exp.addedBy&&` • ${exp.addedBy}`}</p></div>
+            <span className="font-bold text-gray-800 text-sm">{fmt(exp.amount)}</span>
+            <button onClick={()=>handleDel(exp.id)} disabled={deleting===exp.id} className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-300 hover:text-red-400">
+              {deleting===exp.id?<Spin dark/>:<I.Trash/>}
+            </button>
+          </div>;})}
+        </div>
+      </div>
+    </div>
+    <button onClick={()=>setShowModal(true)} className="fixed bottom-24 left-5 w-14 h-14 bg-brand-800 text-white rounded-2xl shadow-xl flex items-center justify-center z-40 active:scale-95 transition-all" style={{boxShadow:'0 8px 24px rgba(30,58,95,.35)'}}><I.Plus/></button>
+    {showModal&&<AddExpenseModal onClose={()=>setShowModal(false)} onSave={handleAdd} saving={saving} user={user}/>}
+  </div>;
+}
+
+function FixedExpenses({sheetId}){
+  const [items,setItems]=useState([]);const [loading,setLoading]=useState(true);
+  const [saving,setSaving]=useState(false);const [deleting,setDeleting]=useState(null);
+  const [showAdd,setShowAdd]=useState(false);const [editing,setEditing]=useState(null);
+  const load=useCallback(async()=>{setLoading(true);try{const r=await readRange(sheetId,'קבועות!A:G');setItems(parseFix(r));}catch(e){}finally{setLoading(false);}}, [sheetId]);
+  useEffect(()=>{load();},[load]);
+  const handleAdd=async(d)=>{setSaving(true);try{await appendRow(sheetId,'קבועות',[uid(),d.name,d.category,d.amount,d.frequency,d.dayOfMonth,d.notes]);await load();setShowAdd(false);}finally{setSaving(false);}};
+  const handleUpd=async(d)=>{setSaving(true);try{await deleteRowById(sheetId,'קבועות',editing);await appendRow(sheetId,'קבועות',[editing,d.name,d.category,d.amount,d.frequency,d.dayOfMonth,d.notes]);await load();setEditing(null);}catch(e){alert(e.message);}finally{setSaving(false);}};
+  const handleDel=async(id)=>{if(!confirm('למחוק?'))return;setDeleting(id);try{await deleteRowById(sheetId,'קבועות',id);setItems(p=>p.filter(i=>i.id!==id));}catch(e){alert(e.message);}finally{setDeleting(null);}};
+  const tM=items.filter(i=>i.frequency==='monthly').reduce((s,i)=>s+i.amount,0);
+  const tB=items.filter(i=>i.frequency==='bimonthly').reduce((s,i)=>s+i.amount/2,0);
+  function Form({init,onSave,onCancel}){
+    const blank={name:'',category:'דיור',amount:'',frequency:'monthly',dayOfMonth:1,notes:''};
+    const [f,setF]=useState(init||blank);const s=(k,v)=>setF(p=>({...p,[k]:v}));
+    return <div className="bg-blue-50 border border-brand-200 rounded-2xl p-4 space-y-3">
+      <input type="text" placeholder="שם החיוב" value={f.name} onChange={e=>s('name',e.target.value)} className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+      <div className="grid grid-cols-2 gap-2">
+        <div><label className="text-xs text-gray-500 mb-1 block">קטגוריה</label><select value={f.category} onChange={e=>s('category',e.target.value)} className="w-full px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-sm focus:outline-none">{CATS.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
+        <div><label className="text-xs text-gray-500 mb-1 block">סכום (₪)</label><input type="number" inputMode="numeric" placeholder="0" value={f.amount} onChange={e=>s('amount',e.target.value)} className="w-full px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-sm focus:outline-none"/></div>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div><label className="text-xs text-gray-500 mb-1 block">תדירות</label><select value={f.frequency} onChange={e=>s('frequency',e.target.value)} className="w-full px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-sm focus:outline-none">{Object.entries(FREQ).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></div>
+        <div><label className="text-xs text-gray-500 mb-1 block">יום בחודש</label><input type="number" min="1" max="31" value={f.dayOfMonth} onChange={e=>s('dayOfMonth',+e.target.value)} className="w-full px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-sm focus:outline-none"/></div>
+      </div>
+      <input type="text" placeholder="הערות" value={f.notes} onChange={e=>s('notes',e.target.value)} className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm focus:outline-none"/>
+      <div className="flex gap-2">
+        <button onClick={()=>onSave({...f,amount:+f.amount})} disabled={saving||!f.name||!f.amount} className="flex-1 bg-brand-800 text-white py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-1.5 disabled:opacity-50">{saving?<Spin/>:<><I.Check s={15}/>שמור</>}</button>
+        <button onClick={onCancel} className="px-4 py-2.5 rounded-xl bg-gray-100 text-gray-600"><I.X s={15}/></button>
+      </div>
+    </div>;
+  }
+  return <div className="flex flex-col h-full">
+    <div className="px-5 pt-4 pb-5 text-white flex-shrink-0" style={{background:'linear-gradient(135deg,#1e3a5f,#2f5496)'}}>
+      <h1 className="text-white font-bold text-xl">הוצאות קבועות</h1>
+      <div className="flex gap-3 mt-3">{[['חודשי',tM],['ממוצע דו-חודשי',tB],['סה"כ',tM+tB]].map(([l,v])=><div key={l} className="flex-1 bg-white/10 rounded-xl px-2 py-2.5 text-center"><p className="text-blue-200 text-xs">{l}</p><p className="text-white font-bold text-sm">{fmt(v)}</p></div>)}</div>
+    </div>
+    <div className="flex-1 overflow-y-auto px-4 py-4 pb-24 space-y-3">
+      {items.some(i=>i.frequency==='bimonthly')&&<div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-2xl p-3"><span className="text-amber-500 mt-0.5">⚠️</span><p className="text-xs text-amber-700"><strong>תזכורת:</strong> חשבונות דו-חודשיים — הפרשה חודשית מומלצת.</p></div>}
+      {showAdd&&<Form onSave={handleAdd} onCancel={()=>setShowAdd(false)}/>}
+      {loading&&<div className="flex justify-center py-10"><Spin dark/></div>}
+      {!loading&&items.length===0&&!showAdd&&<div className="flex flex-col items-center py-12 text-gray-400"><span className="text-5xl mb-3">🔄</span><p className="text-sm">אין חיובים קבועים</p></div>}
+      {items.map(item=>{
+        const m=CM[item.category]||CM['אחר'];const today=new Date().getDate();const soon=item.dayOfMonth>=today&&item.dayOfMonth<=today+7;
+        return editing===item.id?<Form key={item.id} init={item} onSave={handleUpd} onCancel={()=>setEditing(null)}/>
+          :<div key={item.id} className={`bg-white rounded-2xl p-4 shadow-sm border ${soon?'border-amber-300':'border-gray-100'}`}>
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl flex-shrink-0" style={{backgroundColor:m.b}}>{m.i}</div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2"><p className="font-bold text-gray-800">{item.name}</p>{soon&&<span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">בקרוב</span>}</div>
+                <p className="text-xs text-gray-400 mt-1">{item.category} • {FREQ[item.frequency]} • יום {item.dayOfMonth}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-gray-800">{fmt(item.amount)}</span>
+                <button onClick={()=>setEditing(item.id)} className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-300 hover:text-brand-600"><I.Edit/></button>
+                <button onClick={()=>handleDel(item.id)} disabled={deleting===item.id} className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-300 hover:text-red-400">{deleting===item.id?<Spin dark/>:<I.Trash/>}</button>
+              </div>
+            </div>
+          </div>;
+      })}
+    </div>
+    {!showAdd&&<button onClick={()=>setShowAdd(true)} className="fixed bottom-24 left-5 w-14 h-14 bg-brand-800 text-white rounded-2xl shadow-xl flex items-center justify-center z-40" style={{boxShadow:'0 8px 24px rgba(30,58,95,.35)'}}><I.Plus/></button>}
+  </div>;
+}
+
+function Income({sheetId}){
+  const [items,setItems]=useState([]);const [loading,setLoading]=useState(true);const [saving,setSaving]=useState(false);const [dirty,setDirty]=useState(false);
+  useEffect(()=>{readRange(sheetId,'הכנסות!A:E').then(r=>{setItems(parseInc(r));setLoading(false);}).catch(()=>setLoading(false));},[sheetId]);
+  const s=(i,k,v)=>{setItems(p=>p.map((it,idx)=>idx===i?{...it,[k]:v}:it));setDirty(true);};
+  const add=()=>{setItems(p=>[...p,{id:uid(),name:'',amount:'',frequency:'monthly',notes:''}]);setDirty(true);};
+  const rem=(i)=>{setItems(p=>p.filter((_,idx)=>idx!==i));setDirty(true);};
+  const save=async()=>{
+    setSaving(true);
+    try{const rows=items.filter(it=>it.name&&+it.amount>0).map(it=>[it.id||uid(),it.name,+it.amount,it.frequency,it.notes]);await overwriteSheet(sheetId,'הכנסות',['ID','שם','סכום','תדירות','הערות'],rows);setDirty(false);}
+    catch(e){alert(e.message);}finally{setSaving(false);}
+  };
+  const total=items.filter(i=>i.frequency==='monthly').reduce((s,i)=>s+(+i.amount||0),0);
+  return <div className="flex flex-col h-full">
+    <div className="px-5 pt-4 pb-5 text-white flex-shrink-0" style={{background:'linear-gradient(135deg,#1e3a5f,#2f5496)'}}>
+      <h1 className="text-white font-bold text-xl">הכנסות</h1>
+      <div className="flex gap-3 mt-3">
+        <div className="flex-1 bg-white/10 rounded-xl px-3 py-2.5 text-center"><p className="text-blue-200 text-xs">סה"כ חודשי</p><p className="text-white font-bold text-xl">{fmt(total)}</p></div>
+        <div className="flex-1 bg-white/10 rounded-xl px-3 py-2.5 text-center"><p className="text-blue-200 text-xs">מקורות</p><p className="text-white font-bold text-xl">{items.length}</p></div>
+      </div>
+    </div>
+    <div className="flex-1 overflow-y-auto px-4 py-4 pb-28 space-y-3">
+      {loading&&<div className="flex justify-center py-10"><Spin dark/></div>}
+      {!loading&&items.length===0&&<div className="flex flex-col items-center py-12 text-gray-400"><span className="text-5xl mb-3">💰</span><p className="text-sm">הוסיפו מקורות הכנסה</p></div>}
+      {items.map((item,idx)=><div key={item.id||idx} className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 space-y-3">
+        <div className="flex items-center gap-2">
+          <input type="text" placeholder="שם מקור ההכנסה" value={item.name} onChange={e=>s(idx,'name',e.target.value)} className="flex-1 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+          <button onClick={()=>rem(idx)} className="w-9 h-9 flex items-center justify-center rounded-xl text-gray-300 hover:text-red-400"><I.Trash s={16}/></button>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <input type="number" inputMode="numeric" placeholder="סכום ₪" value={item.amount} onChange={e=>s(idx,'amount',e.target.value)} className="px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+          <select value={item.frequency} onChange={e=>s(idx,'frequency',e.target.value)} className="px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm focus:outline-none">
+            {Object.entries(FREQ).map(([k,v])=><option key={k} value={k}>{v}</option>)}
+          </select>
+        </div>
+      </div>)}
+      <button onClick={add} className="w-full py-3.5 rounded-2xl border-2 border-dashed border-brand-200 text-brand-600 font-semibold text-sm flex items-center justify-center gap-2 hover:bg-brand-50"><I.Plus/> הוספת מקור הכנסה</button>
+    </div>
+    {dirty&&<div className="fixed bottom-20 left-0 right-0 px-4 z-40"><button onClick={save} disabled={saving} className="w-full max-w-lg mx-auto block bg-emerald-600 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 shadow-xl disabled:opacity-50">{saving?<Spin/>:<><I.Check s={18}/>שמור שינויים</>}</button></div>}
+  </div>;
+}
+
+function SettingsTab({sheetId,onSignOut,user}){
+  const [budget,setBudget]=useState({});const [byCat,setByCat]=useState({});const [income,setIncome]=useState([]);
+  const [loading,setLoading]=useState(true);const [saving,setSaving]=useState(false);const [dirty,setDirty]=useState(false);const [showShare,setShowShare]=useState(false);
+  useEffect(()=>{
+    const now=new Date();
+    Promise.all([readRange(sheetId,'תקציב!A:B'),readRange(sheetId,'הוצאות!A:G'),readRange(sheetId,'הכנסות!A:E')])
+      .then(([b,e,i])=>{
+        setBudget(parseBud(b));
+        const all=parseExp(e).filter(ex=>{const d=new Date(ex.date);return(d.getMonth()+1)===now.getMonth()+1&&d.getFullYear()===now.getFullYear();});
+        const bc={};all.forEach(ex=>{bc[ex.category]=(bc[ex.category]||0)+ex.amount;});setByCat(bc);
+        setIncome(parseInc(i));setLoading(false);
+      }).catch(()=>setLoading(false));
+  },[sheetId]);
+  const setVal=(cat,v)=>{setBudget(b=>({...b,[cat]:v}));setDirty(true);};
+  const save=async()=>{
+    setSaving(true);
+    try{const rows=Object.entries(budget).filter(([,v])=>+v>0).map(([k,v])=>[k,+v]);await overwriteSheet(sheetId,'תקציב',['קטגוריה','תקציב חודשי'],rows);setDirty(false);}
+    catch(e){alert(e.message);}finally{setSaving(false);}
+  };
+  const totalSpent=Object.values(byCat).reduce((s,v)=>s+v,0);
+  const totalInc=income.filter(i=>i.frequency==='monthly').reduce((s,i)=>s+i.amount,0);
+  const totalBgt=Object.values(budget).reduce((s,v)=>s+(+v||0),0);
+  return <div className="flex flex-col h-full">
+    <div className="px-5 pt-4 pb-5 text-white flex-shrink-0" style={{background:'linear-gradient(135deg,#1e3a5f,#2f5496)'}}>
+      <h1 className="text-white font-bold text-xl">הגדרות וסיכום</h1>
+      {user&&<p className="text-blue-200 text-sm mt-1">👤 {user}</p>}
+    </div>
+    <div className="flex-1 overflow-y-auto px-4 py-4 pb-28 space-y-4">
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+        <h3 className="text-sm font-bold text-gray-700 mb-3">סיכום חודשי</h3>
+        <div className="grid grid-cols-2 gap-3">
+          {[['הכנסות',totalInc,'text-emerald-600'],['הוצאות',totalSpent,'text-red-500'],['מאזן',totalInc-totalSpent,totalInc-totalSpent>=0?'text-emerald-600':'text-red-500']].map(([l,v,c])=><div key={l} className="bg-gray-50 rounded-xl p-3"><p className="text-xs text-gray-500">{l}</p><p className={`font-bold text-lg mt-0.5 ${c}`}>{fmt(v)}</p></div>)}
+        </div>
+      </div>
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+        <div className="flex items-center justify-between mb-3"><h3 className="text-sm font-bold text-gray-700">תקציב לפי קטגוריה</h3><span className="text-xs text-gray-400">סה"כ: {fmt(totalBgt)}</span></div>
+        {loading?<div className="flex justify-center py-8"><Spin dark/></div>:<div className="space-y-2.5">
+          {CATS.map(cat=>{const m=CM[cat];const spent=byCat[cat]||0;const b=+(budget[cat]||0);const over=b>0&&spent>b;return <div key={cat} className="flex items-center gap-3">
+            <span className="text-xl w-8 text-center">{m.i}</span>
+            <label className="flex-1 text-sm font-medium text-gray-700">{cat}</label>
+            {spent>0&&<span className={`text-xs font-medium ${over?'text-red-500':'text-gray-400'}`}>{fmt(spent)}</span>}
+            <div className="relative">
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">₪</span>
+              <input type="number" inputMode="numeric" placeholder="0" value={budget[cat]||''} onChange={e=>setVal(cat,e.target.value)} className={`w-28 pl-3 pr-8 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 ${over?'border-red-300 bg-red-50':'border-gray-200 bg-gray-50'}`}/>
+            </div>
+          </div>;})}
+        </div>}
+      </div>
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 space-y-3">
+        <h3 className="text-sm font-bold text-gray-700 mb-1">פעולות</h3>
+        <button onClick={()=>setShowShare(true)} className="w-full flex items-center gap-3 px-4 py-3.5 rounded-xl bg-brand-50 border border-brand-100 text-brand-800 font-semibold text-sm hover:bg-brand-100 transition"><I.Share s={18}/> שתף עם בן/בת הזוג</button>
+        <a href={`https://docs.google.com/spreadsheets/d/${sheetId}`} target="_blank" rel="noopener noreferrer" className="w-full flex items-center gap-3 px-4 py-3.5 rounded-xl bg-emerald-50 border border-emerald-100 text-emerald-800 font-semibold text-sm hover:bg-emerald-100 transition"><span>📊</span> פתח את הגיליון בגוגל</a>
+        <button onClick={()=>{if(confirm('להתנתק?')){signOut();onSignOut();}}} className="w-full flex items-center gap-3 px-4 py-3.5 rounded-xl bg-red-50 border border-red-100 text-red-700 font-semibold text-sm hover:bg-red-100 transition"><I.Logout s={18}/> התנתק</button>
+      </div>
+      <p className="text-center text-xs text-gray-400 pb-2">ביחד © {new Date().getFullYear()} · הנתונים שמורים ב-Google Sheets שלך בלבד</p>
+    </div>
+    {dirty&&<div className="fixed bottom-20 left-0 right-0 px-4 z-40"><button onClick={save} disabled={saving} className="w-full max-w-lg mx-auto block bg-brand-800 text-white py-4 rounded-2xl font-bold shadow-xl flex items-center justify-center gap-2 disabled:opacity-50">{saving?<Spin/>:<><I.Check s={18}/>שמור תקציב</>}</button></div>}
+    {showShare&&<ShareModal sheetId={sheetId} onClose={()=>setShowShare(false)}/>}
+  </div>;
+}
+
+function SetupWizard({onDone}){
+  const [step,setStep]=useState('welcome');const [status,setStatus]=useState('');const [err,setErr]=useState('');
+  const start=async()=>{
+    setStep('creating');setErr('');
+    try{
+      setStatus('מתחבר לחשבון Google...');const tok=await signIn();if(!tok) throw new Error('ההתחברות בוטלה');
+      setStatus('יוצר גיליון Google Sheets...');const sheet=await createSpreadsheet();const sid=sheet.spreadsheetId;
+      setStatus('מכין את הגיליון...');await initHeaders(sid);
+      localStorage.setItem(LS.SHEET,sid);
+      try{const r=await fetch(`https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${_tok}`);const info=await r.json();if(info.email)localStorage.setItem(LS.USER,info.email.split('@')[0]);}catch(e){}
+      setStep('done');setTimeout(()=>onDone(sid),1500);
+    }catch(e){setErr(e.message||'שגיאה');setStep('welcome');}
+  };
+  return <div className="flex flex-col h-screen items-center justify-center px-6" style={{background:'linear-gradient(160deg,#1e3a5f,#0f2040)'}}>
+    <div className="w-full max-w-sm">
+      <div className="flex flex-col items-center mb-8">
+        <div className="w-20 h-20 bg-white rounded-3xl flex items-center justify-center shadow-2xl mb-4"><Logo size={52}/></div>
+        <h1 className="text-4xl font-extrabold text-white tracking-tight">ביחד</h1>
+        <p className="text-blue-200 text-base mt-1">ניהול תזרים משפחתי</p>
+      </div>
+      {step==='welcome'&&<div className="fade-in space-y-4">
+        <div className="bg-white/10 rounded-2xl p-5 space-y-3">
+          {[['🔒','הנתונים שמורים בחשבון Google שלך בלבד'],['👫','שתף עם בן/בת הזוג בלחיצה אחת'],['📊','הוצאות, חיובים קבועים, הכנסות ותקציב'],['⚡','ללא הגדרות — מוכן תוך שניות']].map(([icon,text])=><div key={text} className="flex items-center gap-3"><span className="text-2xl">{icon}</span><p className="text-white text-sm font-medium">{text}</p></div>)}
+        </div>
+        {err&&<div className="bg-red-500/20 border border-red-400/30 rounded-2xl p-3 text-red-200 text-sm text-center">⚠️ {err}</div>}
+        <button onClick={start} className="w-full bg-white text-brand-800 py-4 rounded-2xl font-bold text-base flex items-center justify-center gap-3 hover:bg-blue-50 active:scale-95 transition-all shadow-xl">
+          <svg width="20" height="20" viewBox="0 0 48 48"><path fill="#4285F4" d="M45.12 24.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51 2.75-2.06 5.08-4.39 6.64v5.52h7.11c4.16-3.83 6.56-9.47 6.56-16.17z"/><path fill="#34A853" d="M24 46c5.94 0 10.92-1.97 14.56-5.33l-7.11-5.52c-1.97 1.32-4.49 2.1-7.45 2.1-5.73 0-10.58-3.87-12.31-9.07H4.34v5.7C7.96 41.07 15.4 46 24 46z"/><path fill="#FBBC05" d="M11.69 28.18C11.25 26.86 11 25.45 11 24s.25-2.86.69-4.18v-5.7H4.34C2.85 17.09 2 20.45 2 24c0 3.55.85 6.91 2.34 9.88l7.35-5.7z"/><path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z"/></svg>
+          התחל עם Google
+        </button>
+        <p className="text-blue-200/60 text-xs text-center">הנתונים לא עוברים דרך שרתי האפליקציה</p>
+      </div>}
+      {step==='creating'&&<div className="fade-in flex flex-col items-center gap-6">
+        <div className="w-16 h-16 rounded-full border-4 border-white/20 border-t-white spin"/>
+        <div className="text-center"><p className="text-white font-bold text-lg">מכין את האפליקציה...</p><p className="text-blue-200 text-sm mt-2 pulse">{status}</p></div>
+      </div>}
+      {step==='done'&&<div className="fade-in flex flex-col items-center gap-4">
+        <div className="w-16 h-16 rounded-full bg-emerald-500 flex items-center justify-center shadow-xl"><I.Check s={32}/></div>
+        <p className="text-white font-bold text-xl">הכל מוכן! 🎉</p>
+        <p className="text-blue-200 text-sm text-center">הגיליון נוצר בחשבון Google שלך</p>
+      </div>}
+    </div>
+  </div>;
+}
+
+const TABS=[
+  {id:'dashboard',label:'דשבורד',  Nav:({a})=><I.NH a={a}/>, Comp:Dashboard},
+  {id:'fixed',    label:'קבועות',  Nav:({a})=><I.NR a={a}/>, Comp:FixedExpenses},
+  {id:'income',   label:'הכנסות',  Nav:({a})=><I.NT a={a}/>, Comp:Income},
+  {id:'settings', label:'הגדרות',  Nav:({a})=><I.NS a={a}/>, Comp:SettingsTab},
+];
+
+function App(){
+  const [screen,setScreen]=useState('loading');const [sheetId,setSheetId]=useState(null);const [activeTab,setActiveTab]=useState('dashboard');const [user,setUser]=useState('');
+  useEffect(()=>{
+    authInit(()=>{
+      const sid=localStorage.getItem(LS.SHEET);const u=localStorage.getItem(LS.USER)||'';setUser(u);
+      if(sid){getToken().then(tok=>{if(tok){setSheetId(sid);setScreen('app');}else{setScreen('setup');}}).catch(()=>setScreen('setup'));}
+      else setScreen('setup');
+    });
+  },[]);
+  const handleDone=sid=>{setSheetId(sid);setUser(localStorage.getItem(LS.USER)||'');setScreen('app');};
+  const handleOut=()=>{setSheetId(null);setScreen('setup');};
+  if(screen==='loading') return <div className="flex h-screen items-center justify-center" style={{background:'linear-gradient(160deg,#1e3a5f,#0f2040)'}}><div className="flex flex-col items-center gap-4"><Logo size={52}/><div className="w-8 h-8 rounded-full border-2 border-white/20 border-t-white spin mt-2"/></div></div>;
+  if(screen==='setup') return <SetupWizard onDone={handleDone}/>;
+  return <div className="flex flex-col h-screen max-w-lg mx-auto overflow-hidden bg-gray-50" style={{fontFamily:"'Assistant',sans-serif"}}>
+    <header className="flex-shrink-0 flex items-center justify-center bg-white border-b border-gray-100" style={{height:'52px',paddingTop:'env(safe-area-inset-top,0px)'}}>
+      <Logo size={36}/>
+    </header>
+    <main className="flex-1 overflow-hidden relative">
+      {activeTab==='dashboard'&&<Dashboard key="d" sheetId={sheetId} user={user}/>}
+      {activeTab==='fixed'    &&<FixedExpenses key="f" sheetId={sheetId}/>}
+      {activeTab==='income'   &&<Income key="i" sheetId={sheetId}/>}
+      {activeTab==='settings' &&<SettingsTab key="s" sheetId={sheetId} onSignOut={handleOut} user={user}/>}
+    </main>
+    <nav className="flex-shrink-0 bg-white border-t border-gray-100 shadow-[0_-4px_20px_rgba(0,0,0,0.06)]" style={{paddingBottom:'env(safe-area-inset-bottom,0px)'}}>
+      <div className="flex">
+        {TABS.map(({id,label,Nav})=>{const active=activeTab===id;return <button key={id} onClick={()=>setActiveTab(id)} className={`flex-1 flex flex-col items-center justify-center py-3 gap-0.5 transition-all ${active?'text-brand-800':'text-gray-400'}`}>
+          <div className={`relative transition-transform ${active?'scale-110':''}`}><Nav a={active}/>{active&&<span className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full bg-brand-800"/>}</div>
+          <span className={`text-xs mt-0.5 ${active?'font-bold':'font-medium'}`}>{label}</span>
+        </button>;})}
+      </div>
+    </nav>
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
